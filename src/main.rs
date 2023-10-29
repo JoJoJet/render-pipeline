@@ -1,10 +1,11 @@
 //! A shader that reads a mesh's custom vertex attribute.
 
 use bevy::{
+    core_pipeline::core_3d,
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
-        render_graph,
+        render_graph::{self, RenderGraphApp, ViewNode, ViewNodeRunner},
         render_resource::{
             BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BlendState,
             Buffer, BufferInitDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState,
@@ -45,9 +46,12 @@ impl Plugin for MyRenderPlugin {
         let render_app = app.sub_app_mut(RenderApp);
         render_app.add_systems(Render, prepare_bind_group.in_set(RenderSet::Prepare));
 
-        let node =MyRenderNode::from_world(&mut render_app.world);
-        let mut render_graph = render_app.world.resource_mut::<render_graph::RenderGraph>();
-        render_graph.add_node("my_render", node);
+        render_app
+            .add_render_graph_node::<ViewNodeRunner<MyRenderNode>>(
+                core_3d::graph::NAME,
+                "my_render",
+            )
+            .add_render_graph_edges(core_3d::graph::NAME, &["my_render"]);
     }
 
     fn finish(&self, app: &mut App) {
@@ -157,27 +161,17 @@ fn prepare_bind_group(
     });
 }
 
-struct MyRenderNode {
-    view_target_query: QueryState<&'static ViewTarget>,
-}
+#[derive(Default)]
+struct MyRenderNode;
 
-impl FromWorld for MyRenderNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            view_target_query: QueryState::new(world),
-        }
-    }
-}
-
-impl render_graph::Node for MyRenderNode {
-    fn update(&mut self, world: &mut World) {
-        self.view_target_query.update_archetypes(world);
-    }
+impl ViewNode for MyRenderNode {
+    type ViewQuery = &'static ViewTarget;
 
     fn run(
         &self,
         _graph: &mut render_graph::RenderGraphContext,
         render_context: &mut RenderContext,
+        view_target: &ViewTarget,
         world: &World,
     ) -> Result<(), render_graph::NodeRunError> {
         let MyRenderBindings {
@@ -187,31 +181,26 @@ impl render_graph::Node for MyRenderNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline = world.resource::<MyRenderPipeline>();
 
-        let view = {
-            let mut views = self.view_target_query.iter_manual(world);
-            let v = views.next().unwrap();
-            assert!(views.next().is_none());
-            v
-        };
-
         let mut pass = render_context
             .command_encoder()
             .begin_render_pass(&RenderPassDescriptor {
                 label: Some("my_render_pass"),
-                color_attachments: &[Some(view.get_unsampled_color_attachment(Operations {
-                    load: LoadOp::Clear(Color::BLACK.into()),
-                    store: true,
-                }))],
+                color_attachments: &[Some(view_target.get_unsampled_color_attachment(
+                    Operations {
+                        load: LoadOp::Clear(Color::BLACK.into()),
+                        store: true,
+                    },
+                ))],
                 depth_stencil_attachment: None,
             });
-
-        pass.set_vertex_buffer(0, (*vertex_buffer.slice(..)).clone());
-        pass.set_bind_group(0, bind_group, &[]);
 
         let render_pipeline = pipeline_cache
             .get_render_pipeline(pipeline.render_pipeline)
             .unwrap();
         pass.set_pipeline(render_pipeline);
+
+        pass.set_vertex_buffer(0, (*vertex_buffer.slice(..)).clone());
+        pass.set_bind_group(0, bind_group, &[]);
 
         pass.draw(0..3, 0..1);
 
